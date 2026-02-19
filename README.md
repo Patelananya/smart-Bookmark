@@ -4,9 +4,9 @@ A production-ready, real-time bookmark manager built with Next.js 14+, Supabase,
 
 ## 🚀 Live Demo
 
-[Live URL Placeholder]
+(https://smart-bookmark-git-main-ananya-jannathas-projects.vercel.app/)
 
-![App Screenshot Placeholder]
+
 
 ## 🛠 Tech Stack
 
