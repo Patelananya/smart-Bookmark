@@ -15,36 +15,87 @@ interface Bookmark {
 export default function BookmarkList({ user, refreshTrigger = 0 }: { user: any, refreshTrigger?: number }) {
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([])
   const [loading, setLoading] = useState(true)
-  const supabase = createClient()
+  // Ensure supabase client is stable across renders
+  const [supabase] = useState(() => createClient())
 
+  // Effect for fetching bookmarks (runs on mount and when refreshTrigger changes)
   useEffect(() => {
-    console.log('BookmarkList mounted, user ID:', user.id)
+    console.log('Fetching bookmarks...')
     fetchBookmarks()
+  }, [user.id, refreshTrigger])
 
-    const channel = supabase
-      .channel('realtime bookmarks')
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'bookmarks',
-          filter: `user_id=eq.${user.id}`,
-        },
-        (payload) => {
-          if (payload.eventType === 'INSERT') {
-            setBookmarks((prev) => [payload.new as Bookmark, ...prev])
-          } else if (payload.eventType === 'DELETE') {
-            setBookmarks((prev) => prev.filter((b) => b.id !== payload.old.id))
+  // Effect for Realtime subscription (runs only when user.id changes)
+  useEffect(() => {
+    let mounted = true
+    let channel: ReturnType<typeof supabase.channel> | null = null
+
+    const setupSubscription = async () => {
+      // Debounce subscription to avoid race conditions in StrictMode
+      await new Promise(resolve => setTimeout(resolve, 300))
+      if (!mounted) return
+
+      console.log('Setting up Realtime subscription for user:', user.id)
+
+      // Check session for debug
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!mounted) return
+      console.log('Session status for Realtime:', session?.access_token ? 'Valid' : 'Invalid')
+
+      channel = supabase
+        .channel(`realtime_bookmarks_${user.id}`)
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'bookmarks',
+          },
+          (payload: any) => {
+            if (!mounted) return
+            console.log('Realtime event received:', payload)
+            
+            if (payload.eventType === 'INSERT') {
+              const newBookmark = payload.new as Bookmark
+              // Security check: ensure the bookmark belongs to the user
+              if (newBookmark.user_id !== user.id) return
+  
+              setBookmarks((prev) => {
+                if (prev.some(b => b.id === newBookmark.id)) return prev
+                return [newBookmark, ...prev]
+              })
+            } else if (payload.eventType === 'DELETE') {
+               // Optimistic UI might have already removed it, but this syncs other tabs
+               setBookmarks((prev) => prev.filter((b) => b.id !== payload.old.id))
+            }
           }
-        }
-      )
-      .subscribe()
+        )
+        .subscribe((status, err) => {
+          if (!mounted) return
+          console.log(`Realtime status for ${user.id}:`, status)
+          if (err) console.error('Realtime error:', err)
+          
+          if (status === 'TIMED_OUT') {
+            console.log('Retrying subscription in 5s...')
+            setTimeout(() => {
+              if (mounted && channel) {
+                 supabase.removeChannel(channel)
+                 setupSubscription()
+              }
+            }, 5000)
+          }
+        })
+    }
+
+    setupSubscription()
 
     return () => {
-      supabase.removeChannel(channel)
+      mounted = false
+      if (channel) {
+        console.log('Cleaning up Realtime subscription')
+        supabase.removeChannel(channel)
+      }
     }
-  }, [user.id, refreshTrigger])
+  }, [user.id]) // Removed refreshTrigger dependency to avoid reconnecting on manual updates
 
   const fetchBookmarks = async () => {
     try {
@@ -69,8 +120,6 @@ export default function BookmarkList({ user, refreshTrigger = 0 }: { user: any, 
   }
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this bookmark?')) return
-
     // Optimistic update
     setBookmarks((prev) => prev.filter((b) => b.id !== id))
 
